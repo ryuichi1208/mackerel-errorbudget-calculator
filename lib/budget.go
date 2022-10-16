@@ -9,9 +9,14 @@ import (
 	"github.com/mackerelio/mackerel-client-go"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+
+	mp "github.com/mackerelio/go-mackerel-plugin"
 )
 
-const Name string = "mackerel-plugin-dns-lookup"
+// Name is executable name of this application.
+const Name string = "mackerel-plugin-conntrack"
+
+// Version is version string of this application.
 const Version string = "0.1.0"
 
 var logger *zap.Logger
@@ -23,10 +28,12 @@ type options struct {
 	Roles            string  `short:"r" long:"roles" description:"" required:"true"`
 	Filter           string  `short:"f" long:"filter" description:"" required:"false"`
 	Metrics          string  `short:"m" long:"metrics" description:"" required:"true"`
-	ObjectiveLatency float64 `long:"objective-latency" description:"" required:"true"`
-	ErrorBudgetSize  float64 `long:"errorbudget-size" description:"" default:"0.01" required:"false"`
-	TimeWindow       int     `long:"timewindo" description:"" default:"30" required:"false"`
-	Debug            bool    `long:"debug" description:"" required:"false"`
+	ObjectiveLatency float64 `long:"objective-latency" description:"Specify latency in the range of float64" default:"100" required:"true"`
+	ErrorBudgetSize  float64 `long:"errorbudget-size" description:"Specify SLO value 0.0 ~ 100.0" default:"99.9" required:"false"`
+	TimeWindow       int     `long:"timewindow" description:"Specify time window (unit: day)" default:"30" required:"false"`
+	Prefix           string  `long:"prefix" description:"" required:"false"`
+	Version          bool    `long:"version" description:"print version and exit" required:"false"`
+	Debug            bool    `long:"debug" description:"Enable debug mode" required:"false"`
 }
 
 type Mackerel struct {
@@ -87,7 +94,7 @@ func (m *Mackerel) FetchMetrics(res chan<- map[time.Time]float64, hostId string)
 	to_unix := dt.Unix()
 
 	s := make(map[time.Time]float64)
-	for i := 1; i < 30; i++ {
+	for i := 1; i <= opts.TimeWindow*2; i++ {
 		from_unix = dt.Add(-12 * time.Hour * time.Duration(i)).Unix()
 		metrics, err := m.client.FetchHostMetricValues(hostId, m.metrics, from_unix, to_unix)
 		if err != nil {
@@ -107,16 +114,20 @@ func (m *Mackerel) FetchMetrics(res chan<- map[time.Time]float64, hostId string)
 	return nil
 }
 
-func (m Mackerel) ObjecttiveEvaluation(res map[time.Time]float64, slo SLO) {
+func (m Mackerel) ObjecttiveEvaluation(res map[time.Time]float64, slo SLO) (float64, float64, float64) {
 	var violationsCount float64
 	for k, v := range res {
 		if v > slo.ObjectivesLatency {
-			logger.Debug("[DEBUG]", zap.String("ObjecttiveEvaluation", fmt.Sprintf("%s: %f", k, v)))
+			logger.Debug("over", zap.String("ObjecttiveEvaluation", fmt.Sprintf("%s: %f", k, v)))
 			violationsCount++
+		} else {
+			logger.Debug("under", zap.String("ObjecttiveEvaluation", fmt.Sprintf("%s: %f", k, v)))
 		}
 	}
-	fmt.Println(violationsCount)
-	fmt.Println(100 - (violationsCount / calcTimeWindowMinutes(slo.TimeWindow)))
+
+	logger.Debug("msg", zap.String("ObjecttiveEvaluation", fmt.Sprintf("%d: %f perc: %f", len(res), violationsCount, (100-(violationsCount/(float64(len(res)))*100)))))
+
+	return violationsCount, (100 - (violationsCount / (float64(len(res))) * 100)), float64(len(res)) - ((float64(len(res)) * opts.ErrorBudgetSize) / 100) - violationsCount
 }
 
 func calcAverage(target []map[time.Time]float64) map[time.Time]float64 {
@@ -148,6 +159,10 @@ func run() error {
 		return err
 	}
 
+	if len(a) < 1 {
+		return fmt.Errorf("Not Fetch hosts")
+	}
+
 	logKey := "key"
 
 	c := make(chan map[time.Time]float64, len(a))
@@ -172,7 +187,13 @@ func run() error {
 		TimeWindow:        opts.TimeWindow,
 		ErrorBudgetSize:   opts.ErrorBudgetSize,
 	}
-	cli.ObjecttiveEvaluation(calcAverage(res), slo)
+	logger.Debug("msg options", zap.String("", fmt.Sprintf("%f %d %f", opts.ObjectiveLatency, opts.TimeWindow, opts.ErrorBudgetSize)))
+
+	vioCount, budget, budgetSize := cli.ObjecttiveEvaluation(calcAverage(res), slo)
+
+	b := NewBudget(vioCount, budget, budgetSize)
+	plugin := mp.NewMackerelPlugin(b)
+	plugin.Run()
 
 	return nil
 }
@@ -180,12 +201,12 @@ func run() error {
 func Do() int {
 	err := parseArgs(os.Args[1:])
 	if err != nil {
+		fmt.Println(err)
 		os.Exit(1)
 	}
 	initLogger()
 
 	err = run()
-	fmt.Println(err)
 	if err != nil {
 		return 1
 	}

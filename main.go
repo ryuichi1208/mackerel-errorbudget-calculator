@@ -7,7 +7,13 @@ import (
 	budget "github.com/ryuichi1208/mackerel-errorbudget-calculator/lib"
 )
 
+func init() {
+	if os.Getenv("MACKEREL_TOKEN") == "" {
+		fmt.Println("Set environment variable MACKEREL_TOKEN")
+		os.Exit(1)
+	}
+}
+
 func main() {
-	fmt.Println("exit")
 	os.Exit(budget.Do())
 }
