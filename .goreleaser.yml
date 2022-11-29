@@ -1,5 +1,5 @@
 builds:
-  - binary: mackerel-errorbudget-calculator
+  - binary: mackerel-plugin-errorbudget-calculator
     goos:
       - linux
     goarch:
